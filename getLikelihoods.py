@@ -7,7 +7,7 @@ from astropy.io import fits
 from astropy import units as u
 #from astropy.modeling.models import Ellipse2D
 import matplotlib
-matplotlib.use('Agg')
+#matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 from matplotlib.patches import Ellipse
 
@@ -24,6 +24,9 @@ class FRBHost:
             print("FITS image file must have 4 HDUs:")
             print(descriptions)
             sys.exit()
+
+        # Try and guess a name
+        self.name = self.hostimagefile.split('/')[-1].split('_')[0]
 
         # Estimate and remove the baseline
         self.baseline = self.hostimagehdul[1].data.min()
@@ -64,12 +67,12 @@ class FRBHost:
 
         # Update this new Image HDU to contain the FRB likelihood
         self.hostimagehdul[4].data -= self.hostimagehdul[4].data # Set it to zero initially
-        oversamplefactor = 4
+        oversamplefactor = 5
         subpixgrid = np.zeros(oversamplefactor*oversamplefactor*2).reshape(oversamplefactor*oversamplefactor, 2)
         for i in range(oversamplefactor):
             for j in range(oversamplefactor):
-                subpixgrid[i*oversamplefactor + j][0] = (i+oversamplefactor/2.0)/float(oversamplefactor)
-                subpixgrid[i*oversamplefactor + j][1] = (j+oversamplefactor/2.0)/float(oversamplefactor)
+                subpixgrid[i*oversamplefactor + j][0] = (i-oversamplefactor//2)/float(oversamplefactor)
+                subpixgrid[i*oversamplefactor + j][1] = (j-oversamplefactor//2)/float(oversamplefactor)
         #subpixgrid = []
         #for i in range(oversamplefactor):
         #    for j in range(oversamplefactor):
@@ -77,7 +80,7 @@ class FRBHost:
         for x in range(self.hostimagehdul[4].data.shape[0]):
             for y in range(self.hostimagehdul[4].data.shape[1]):
                 pixgrid = [[l[0]+x, l[1]+y] for l in subpixgrid]
-                radecgrid = self.w.all_pix2world(pixgrid, 1)
+                radecgrid = self.w.all_pix2world(pixgrid, 0)
                 radecoffsets = [[3600*(g[0]-self.frbradeg)*np.cos(self.frbdecdeg*np.pi/180), 3600*(g[1]-self.frbdecdeg)] for g in radecgrid]
                 likelihoods = [np.e**(-(o[0]/self.sigmaraarcsec)**2) * np.e**(-(o[1]/self.sigmadecarcsec)**2) for o in radecoffsets]
                 self.hostimagehdul[4].data[y, x] = np.sum(likelihoods)
@@ -92,7 +95,7 @@ class FRBHost:
 
         # Create a space to store likelihoods
         self.nummodels = len(self.hostimagehdul) - 2
-        self.modelloglikelihoods = np.zeros(self.nummodels)
+        self.modellikelihoods = np.zeros(self.nummodels)
 
     def evaluateModels(self, dostretch):
         for i in range(len(self.descriptions)):
@@ -118,13 +121,13 @@ class FRBHost:
             imagedata /= imsum
 
             # Calculate the log likelihood for this model
-            self.modelloglikelihoods[i] = (imagedata * self.hostimagehdul[4].data).sum()
+            self.modellikelihoods[i] = (imagedata * self.hostimagehdul[4].data).sum()
 
     def printReport(self):
         for i in range(len(self.descriptions)):
             if self.shortdescriptions[i] == "Mask" or self.shortdescriptions[i] == "Localisation":
                 continue # Don't need to evaluate anything for this image
-            print("For model based on {0}, the log likelihood is {1}".format(self.descriptions[i], self.modelloglikelihoods[i]))
+            print("For model based on {0}, the likelihood is {1}".format(self.descriptions[i], self.modellikelihoods[i]))
 
     def plotAll(self):
         for i in range(len(self.descriptions)):
@@ -133,7 +136,9 @@ class FRBHost:
             ax.coords[1].set_axislabel('Declination (J2000)')
             ax.imshow(self.hostimagehdul[i].data) #, vmin=-2.e-5, vmax=2.e-4, origin='lower')
             ax.scatter(self.frbradeg, self.frbdecdeg, transform=ax.get_transform('icrs'), s=30, edgecolor='white', facecolor='none')
-            plt.savefig(self.shortdescriptions[i] + ".png")
+            plt.savefig(self.name + "-" + self.shortdescriptions[i] + ".png")
+            #if i==4:
+            #    plt.show()
             plt.clf()
 
 def plotAndFit(imagedata, shortdescription, radeg, decdeg, frbrapix, 
