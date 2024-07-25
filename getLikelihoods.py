@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 import os, sys, copy
+import glob
+import shutil
 import argparse
 import numpy as np
 from astropy import wcs
@@ -10,11 +12,14 @@ import matplotlib
 #matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 from matplotlib.patches import Ellipse
+from astropy.stats import sigma_clipped_stats
+from astropy.visualization import ImageNormalize,ZScaleInterval,LinearStretch,simple_norm
 
 class FRBHost:
-    def __init__(self, hostimagefile, verbose):
+    def __init__(self, hostimagefile, verbose, log):
         self.hostimagefile = hostimagefile
         self.verbose = verbose
+        self.log = log
         self.descriptions = ["Un-modified image", "Smoothed profile", "Residual from smoothed fit", "Mask"]
         self.shortdescriptions = ["Original", "Profile", "Residual", "Mask"]
 
@@ -27,6 +32,7 @@ class FRBHost:
 
         # Try and guess a name
         self.name = self.hostimagefile.split('/')[-1].split('_')[0]
+        self.filter = self.hostimagefile.split('/')[-1].split('_')[1]
 
         # Estimate and remove the baseline
         self.baseline = self.hostimagehdul[1].data.min()
@@ -35,6 +41,18 @@ class FRBHost:
 
         # Get the WCS
         self.w = wcs.WCS(self.hostimagehdul[1].header, self.hostimagehdul)
+
+        # log
+        if self.log:
+            with open('{0}_{1}_log.txt'.format(self.name, self.filter), 'w') as f:
+                f.write('|---------------------------------|\n')
+                f.write('| Log of Model Likelihood Testing |\n')
+                f.write('|---------------------------------|\n')
+                f.write('\n')
+                f.write('Doing analysis on '+str(self.name)+' '+str(self.filter)+' image\n')
+                f.write('Minimum value of original image is '+str(self.hostimagehdul[0].data.min())+'\n')
+                f.write('Minimum value of Sersic profile is '+str(self.hostimagehdul[1].data.min())+'\n')
+                f.close()
 
     def growMask(self, expandmaskby):
         self.originalmaskdata = self.hostimagehdul[3].data
@@ -52,12 +70,30 @@ class FRBHost:
             self.originalmaskdata = np.copy(self.maskdata)
         self.originalmaskdata = self.hostimagehdul[3].data
 
+        if self.log==True:
+            with open('{0}_{1}_log.txt'.format(self.name, self.filter), 'a') as f:
+                f.write('Growing mask by '+str(expandmaskby)+' pixels in each direction\n')
+                f.close()
+
     def addFRBLocalisation(self, frbradeg, febdecdeg, frbsigmaraarcsec, frbsigmadecarcsec):
         # Store the information about the FRB localisation
         self.frbradeg = frbradeg
         self.frbdecdeg = febdecdeg
         self.sigmaraarcsec = frbsigmaraarcsec
         self.sigmadecarcsec = frbsigmadecarcsec
+        self.frbtheta = 0 # placeholder for plotting FRB ellipse
+
+        if self.log==True:
+            with open('{0}_{1}_log.txt'.format(self.name, self.filter), 'a') as f:
+                f.write('-----------------------------------------\n')
+                f.write('User-input FRB information:\n')
+                f.write('FRB R.A.: '+str(self.frbradeg)+' degrees\n')
+                f.write('FRB Decl.: '+str(self.frbdecdeg)+' degrees\n')
+                f.write('FRB R.A. uncertainty: '+str(self.sigmaraarcsec)+' arcsecs\n')
+                f.write('FRB Decl. uncertainty: '+str(self.sigmadecarcsec)+' arcsecs\n')
+                f.write('FRB uncertainty angle: '+str(self.frbtheta)+' deg E of N\n')
+                f.write('-----------------------------------------\n')
+                f.close()
 
         # Now append a new Image HDU to the end of the HDU list
         self.hostimagehdul.append(self.hostimagehdul[1].copy())
@@ -121,6 +157,11 @@ class FRBHost:
                 print("Imsum is", imsum)
             imagedata /= imsum
 
+            if self.log==True:
+                with open('{0}_{1}_log.txt'.format(self.name, self.filter), 'a') as f:
+                    f.write('Sum of '+str(self.shortdescriptions[i])+' image: '+str(imsum)+'\n')
+                    f.close()
+
             # Calculate the log likelihood for this model
             self.modellikelihoods[i] = (imagedata * self.hostimagehdul[4].data).sum()
 
@@ -130,13 +171,20 @@ class FRBHost:
                 continue # Don't need to evaluate anything for this image
             print("For model based on {0}, the likelihood is {1}".format(self.descriptions[i], self.modellikelihoods[i]))
 
+            if self.log==True:
+                with open('{0}_{1}_log.txt'.format(self.name, self.filter), 'a') as f:
+                    f.write('For model based on '+str(self.descriptions[i])+', the likelihood is '+str(self.modellikelihoods[i])+'\n')
+                    f.close()
+
     def plotAll(self):
         for i in range(len(self.descriptions)):
             ax = plt.subplot(projection=self.w)
             ax.coords[0].set_axislabel('Right Ascension (J2000)')
             ax.coords[1].set_axislabel('Declination (J2000)')
-            ax.imshow(self.hostimagehdul[i].data) #, vmin=-2.e-5, vmax=2.e-4, origin='lower')
-            ax.scatter(self.frbradeg, self.frbdecdeg, transform=ax.get_transform('icrs'), s=30, edgecolor='white', facecolor='none')
+            norm = simple_norm(self.hostimagehdul[i].data, 'linear', percent=99.0)
+            ax.imshow(self.hostimagehdul[i].data, norm=norm) #, vmin=-2.e-5, vmax=2.e-4, origin='lower')
+            frb = Ellipse((self.frbradeg, self.frbdecdeg), width=(self.sigmadecarcsec/3600)*2, height=(self.sigmaraarcsec/3600)*2, angle=90-self.frbtheta, edgecolor='white', facecolor='none', lw=2, transform=ax.get_transform('icrs'))
+            ax.add_patch(frb)
             plt.savefig(self.name + "-" + self.shortdescriptions[i] + ".png")
             #if i==4:
             #    plt.show()
@@ -209,6 +257,7 @@ if __name__ == "__main__":
     parser.add_argument('--dostretch', default=False, action='store_true',
                         help='Apply a stretch to the host galaxy residual image')
     parser.add_argument('-v', '--verbose', default=False, action='store_true')
+    parser.add_argument('--log', default=True, action='store_true')
     args = parser.parse_args()
 
     # Check that we actually got a filename to work with
@@ -216,7 +265,7 @@ if __name__ == "__main__":
         parser.error('You must supply a FITS filename to hostimagefile')
 
     # Create FRBHost object
-    frbhost = FRBHost(args.hostimagefile, args.verbose)
+    frbhost = FRBHost(args.hostimagefile, args.verbose, args.log)
 
     # Expand the mask if desired
     frbhost.growMask(args.growmaskpixels)
@@ -228,6 +277,21 @@ if __name__ == "__main__":
     frbhost.evaluateModels(args.dostretch)
     frbhost.printReport()
     frbhost.plotAll()
+
+    # clean up working directory
+    cwd = os.getcwd()
+
+    if not os.path.exists('Log_Files'):
+        os.makedirs('Log_Files')
+    
+    if not os.path.exists('Figures'):
+        os.makedirs('Figures')
+
+    for file in glob.glob('*.txt'):
+        shutil.move(os.path.join(cwd, file), os.path.join(cwd+'/Log_Files', file))
+    
+    for file in glob.glob('*.png'):
+        shutil.move(os.path.join(cwd, file), os.path.join(cwd+'/Figures', file))
 
 #
 #    if not len(sys.argv) == 6:
