@@ -82,7 +82,8 @@ class FRBHost:
                 pixgrid = [[l[0]+x, l[1]+y] for l in subpixgrid]
                 radecgrid = self.w.all_pix2world(pixgrid, 0)
                 radecoffsets = [[3600*(g[0]-self.frbradeg)*np.cos(self.frbdecdeg*np.pi/180), 3600*(g[1]-self.frbdecdeg)] for g in radecgrid]
-                likelihoods = [np.e**(-(o[0]/self.sigmaraarcsec)**2) * np.e**(-(o[1]/self.sigmadecarcsec)**2) for o in radecoffsets]
+                norm = 1/(2*np.pi*self.sigmaraarcsec*self.sigmadecarcsec)
+                likelihoods = [norm*np.e**(-(o[0])**2/(2*self.sigmaraarcsec**2)) * np.e**(-(o[1])**2/(2*self.sigmadecarcsec**2)) for o in radecoffsets]
                 self.hostimagehdul[4].data[y, x] = np.sum(likelihoods)
 
         # Normalise the FRB localisation probability density
