@@ -16,7 +16,7 @@ from astropy.stats import sigma_clipped_stats
 from astropy.visualization import ImageNormalize,ZScaleInterval,LinearStretch,simple_norm
 
 class FRBHost:
-    def __init__(self, hostimagefile, verbose, log):
+    def __init__(self, hostimagefile, verbose, log, zoompixels):
         self.hostimagefile = hostimagefile
         self.verbose = verbose
         self.log = log
@@ -54,6 +54,14 @@ class FRBHost:
                 f.write('Minimum value of Sersic profile is '+str(self.hostimagehdul[1].data.min())+'\n')
                 f.close()
 
+        # Save the zoompixels
+        if not zoompixels == '':
+            self.zoompixels = [int(x) for x in zoompixels.split(',')]
+            if not len(self.zoompixels) == 4:
+                raise ValueError("Zoompixels must have 4 entries")
+        else:
+            self.zoompixels = []
+
     def growMask(self, expandmaskby):
         self.originalmaskdata = self.hostimagehdul[3].data
         self.maskdata = np.copy(self.originalmaskdata)
@@ -75,13 +83,16 @@ class FRBHost:
                 f.write('Growing mask by '+str(expandmaskby)+' pixels in each direction\n')
                 f.close()
 
-    def addFRBLocalisation(self, frbradeg, febdecdeg, frbsigmaraarcsec, frbsigmadecarcsec):
+    def addFRBLocalisation(self, frbradeg, febdecdeg, frbmajoraxisarcsec, frbminoraxisarcsec, frbpadeg):
         # Store the information about the FRB localisation
         self.frbradeg = frbradeg
         self.frbdecdeg = febdecdeg
-        self.sigmaraarcsec = frbsigmaraarcsec
-        self.sigmadecarcsec = frbsigmadecarcsec
-        self.frbtheta = 0 # placeholder for plotting FRB ellipse
+        #self.sigmaraarcsec = frbsigmaraarcsec
+        #self.sigmadecarcsec = frbsigmadecarcsec
+        #self.frbtheta = 0 # placeholder for plotting FRB ellipse
+        self.frbmajoraxisarcsec = frbmajoraxisarcsec
+        self.frbminoraxisarcsec = frbminoraxisarcsec
+        self.frbparad = frbpadeg*np.pi/180.0
 
         if self.log==True:
             with open('{0}_{1}_log.txt'.format(self.name, self.filter), 'a') as f:
@@ -89,9 +100,12 @@ class FRBHost:
                 f.write('User-input FRB information:\n')
                 f.write('FRB R.A.: '+str(self.frbradeg)+' degrees\n')
                 f.write('FRB Decl.: '+str(self.frbdecdeg)+' degrees\n')
-                f.write('FRB R.A. uncertainty: '+str(self.sigmaraarcsec)+' arcsecs\n')
-                f.write('FRB Decl. uncertainty: '+str(self.sigmadecarcsec)+' arcsecs\n')
-                f.write('FRB uncertainty angle: '+str(self.frbtheta)+' deg E of N\n')
+                #f.write('FRB R.A. uncertainty: '+str(self.sigmaraarcsec)+' arcsecs\n')
+                #f.write('FRB Decl. uncertainty: '+str(self.sigmadecarcsec)+' arcsecs\n')
+                #f.write('FRB uncertainty angle: '+str(self.frbtheta)+' deg E of N\n')
+                f.write('FRB Uncertainty semi major axis: ' + str(self.frbmajoraxisarcsec)+' arcsecs\n')
+                f.write('FRB Uncertainty semi minor axis: ' + str(self.frbminoraxisarcsec)+' arcsecs\n')
+                f.write('FRB uncertainty angle: '+str(frbpadeg)+' deg E of N\n')
                 f.write('-----------------------------------------\n')
                 f.close()
 
@@ -118,9 +132,12 @@ class FRBHost:
                 pixgrid = [[l[0]+x, l[1]+y] for l in subpixgrid]
                 radecgrid = self.w.all_pix2world(pixgrid, 0)
                 radecoffsets = [[3600*(g[0]-self.frbradeg)*np.cos(self.frbdecdeg*np.pi/180), 3600*(g[1]-self.frbdecdeg)] for g in radecgrid]
-                norm = 1/(2*np.pi*self.sigmaraarcsec*self.sigmadecarcsec)
-                likelihoods = [norm*np.e**(-(o[0])**2/(2*self.sigmaraarcsec**2)) * np.e**(-(o[1])**2/(2*self.sigmadecarcsec**2)) for o in radecoffsets]
-                self.hostimagehdul[4].data[y, x] = np.sum(likelihoods)
+                majminoffsets = [[o[0]*np.sin(self.frbparad) + o[1]*np.cos(self.frbparad), -o[0]*np.cos(self.frbparad) + o[1]*np.sin(self.frbparad)] for o in radecoffsets]
+                #norm = 1/(2*np.pi*self.sigmaraarcsec*self.sigmadecarcsec)
+                norm = 1/(2*np.pi*self.frbmajoraxisarcsec*self.frbminoraxisarcsec)
+                #likelihoods = [norm*np.e**(-(o[0])**2/(2*self.sigmaraarcsec**2)) * np.e**(-(o[1])**2/(2*self.sigmadecarcsec**2)) for o in radecoffsets]
+                likelihoods = [norm*np.e**(-(o[0])**2/(2*self.frbmajoraxisarcsec**2)) * np.e**(-(o[1])**2/(2*self.frbminoraxisarcsec**2)) for o in majminoffsets]
+                self.hostimagehdul[4].data[y, x] = np.mean(likelihoods)
 
         # Normalise the FRB localisation probability density
         imsum = self.hostimagehdul[4].data.sum()
@@ -177,67 +194,34 @@ class FRBHost:
                     f.close()
 
     def plotAll(self):
+        # Get an appropriate wcs (zoomed in if necessary)
+        if len(self.zoompixels) > 1:
+            zoomwcs = self.w[self.zoompixels[0]:self.zoompixels[2], self.zoompixels[1]:self.zoompixels[3]]
+        else:
+            zoomwcs = self.w
         for i in range(len(self.descriptions)):
-            ax = plt.subplot(projection=self.w)
+            # get the appropriate subset of data
+            if len(self.zoompixels) > 1:
+                zoomdata = self.hostimagehdul[i].data[self.zoompixels[0]:self.zoompixels[2], self.zoompixels[1]:self.zoompixels[3]]
+            else:
+                zoomdata = self.hostimagehdul[i].data
+
+            # Set up the axes
+            ax = plt.subplot(projection=zoomwcs)
             ax.coords[0].set_axislabel('Right Ascension (J2000)')
             ax.coords[1].set_axislabel('Declination (J2000)')
-            norm = simple_norm(self.hostimagehdul[i].data, 'linear', percent=99.0)
-            ax.imshow(self.hostimagehdul[i].data, norm=norm) #, vmin=-2.e-5, vmax=2.e-4, origin='lower')
-            frb = Ellipse((self.frbradeg, self.frbdecdeg), width=(self.sigmadecarcsec/3600)*2, height=(self.sigmaraarcsec/3600)*2, angle=90-self.frbtheta, edgecolor='white', facecolor='none', lw=2, transform=ax.get_transform('icrs'))
+
+            # Normalise and plot
+            norm = simple_norm(zoomdata, 'linear', percent=99.0)
+            ax.imshow(zoomdata, norm=norm) #, vmin=-2.e-5, vmax=2.e-4, origin='lower')
+
+            # Plot the FRB localisation
+            frb = Ellipse((self.frbradeg, self.frbdecdeg), width=(self.frbmajoraxisarcsec/3600)*2, height=(self.frbminoraxisarcsec/3600)*2, angle=90-self.frbparad*180/np.pi, edgecolor='white', facecolor='none', lw=2, transform=ax.get_transform('icrs'))
             ax.add_patch(frb)
+
+            # Save figure
             plt.savefig(self.name + "-" + self.shortdescriptions[i] + ".png")
-            #if i==4:
-            #    plt.show()
             plt.clf()
-
-def plotAndFit(imagedata, shortdescription, radeg, decdeg, frbrapix, 
-               frbdecpix, rauncertaintypix, decuncertaintypix, w, 
-               dostretch=False, plotFRBLikelihood=False):
-    if dostretch:
-        idata = (imagedata + 1e-9)**0.5
-        idata -= idata.min()
-        idata /= idata.sum()
-    else:
-        idata = imagedata
-    fdata = np.zeros(idata.shape)
-    zoomfactor = 2
-    fig, axs = plt.subplots(1,2)
-    axs[0].imshow(idata[(idata.shape[0]*(zoomfactor-1))//(zoomfactor*2) : (idata.shape[0]*(zoomfactor+1))//(zoomfactor*2),
-                        (idata.shape[1]*(zoomfactor-1))//(zoomfactor*2) : (idata.shape[1]*(zoomfactor+1))//(zoomfactor*2)])
-    axs[1].hist(idata.flatten(), bins=100, log=True)
-
-    # Also plot the localisation region...
-    uncertaintyangle = 0
-    # Ellipse takes diameter, not radii, hence the factor of 2 here...
-    ell = Ellipse((frbrapix - idata.shape[0]*(zoomfactor-1)//(zoomfactor*2), frbdecpix - idata.shape[1]*(zoomfactor-1)//(zoomfactor*2)), 2*rauncertaintypix, 2*decuncertaintypix, uncertaintyangle, fc='none', ec='red', lw=1)
-    axs[0].add_patch(ell)
-    #print("Plotting ellipse at {0},{1} with x length {2} x {3}".format(frbrapix, frbdecpix, rauncarcsec/rapixscale.value, decuncarcsec/decpixscale.value))
-    print("RA uncertainty pix is {0}, Dec uncertainty pix is {1}".format(rauncertaintypix, decuncertaintypix))
-    plt.savefig(shortdescription + ".png")
-    plt.clf()
-
-    likelihood = 0
-
-    # Get a grid of +/- 4sigma RA/dec positions around the most likely FRB position, oversampling each optical pixel by 4x
-    pixgrid = []
-    for j in range(40):
-        for k in range(40):
-            pixgrid.append([int(frbrapix) - 5 + 0.25 + j*0.25, int(frbdecpix) - 5 + 0.25 + k*0.25])
-    radecgrid = w.all_pix2world(pixgrid, 0)
-    for j in range(len(pixgrid)):
-        xpix, ypix = pixgrid[j]
-        ra, dec = radecgrid[j]
-        #print(ra - radeg, dec - decdeg, xpix, ypix, idata[int(xpix), int(ypix)], np.e**(-((ra - radeg)/(rauncarcsec/3600.))**2)*np.e**(-((dec - decdeg)/(decuncarcsec/3600.))**2))
-        likelihood += 0.25*idata[int(xpix), int(ypix)]*np.e**(-((ra - radeg)/(rauncarcsec/3600.))**2)*np.e**(-((dec - decdeg)/(decuncarcsec/3600.))**2)
-        fdata[int(xpix), int(ypix)] += 0.25*np.e**(-((ra - radeg)/(rauncarcsec/3600.))**2)*np.e**(-((dec - decdeg)/(decuncarcsec/3600.))**2)
-    print(idata[int(np.round(frbrapix)) - 3:int(np.round(frbrapix))+3, int(np.round(frbdecpix))-3:int(np.round(frbdecpix))+3])
-    if plotFRBLikelihood:
-        fig, ax = plt.subplots(1,1)
-        ax.imshow(fdata[(fdata.shape[0]*(zoomfactor-1))//(zoomfactor*2) : (fdata.shape[0]*(zoomfactor+1))//(zoomfactor*2),
-                        (fdata.shape[1]*(zoomfactor-1))//(zoomfactor*2) : (fdata.shape[1]*(zoomfactor+1))//(zoomfactor*2)])
-        plt.savefig("frblikelihood.png")
-        plt.clf()
-    return likelihood
 
 if __name__ == "__main__":
     # Parse arguments
@@ -252,26 +236,48 @@ if __name__ == "__main__":
                         help='Number of pixels to grow the mask by')
     parser.add_argument('--frbra', type=float, help='FRB right ascension in degrees')
     parser.add_argument('--frbdec', type=float, help='FRB declination in degrees')
-    parser.add_argument('--rauncarcsec', type=float, help='Uncertainty in FRB RA (arcseconds)')
-    parser.add_argument('--decuncarcsec', type=float, help='Uncertainty in FRB Dec (arcseconds)')
+    parser.add_argument('--rauncarcsec', type=float, default=-1.0, help='Uncertainty in FRB RA (arcseconds)')
+    parser.add_argument('--decuncarcsec', type=float, default=-1.0, help='Uncertainty in FRB Dec (arcseconds)')
+    parser.add_argument('--frbuncmajorarcsec', type=float, default=-1.0, help='Major axis of FRB uncertainty (arcseconds)')
+    parser.add_argument('--frbuncminorarcsec', type=float, default=-1.0, help='Minor axis of FRB uncertainty (arcseconds)')
+    parser.add_argument('--frbuncpa', type=float, default=-1.0, help='Position angle of FRB uncertainty (east of north, degrees)')
+    parser.add_argument('--zoompixels', type=str, default="", help='Pixels to zoom in on in form blc,brc,tlc,trc')
     parser.add_argument('--dostretch', default=False, action='store_true',
                         help='Apply a stretch to the host galaxy residual image')
     parser.add_argument('-v', '--verbose', default=False, action='store_true')
     parser.add_argument('--log', default=True, action='store_true')
     args = parser.parse_args()
 
+    # Check that only one type of error ellipse was provided
+    if args.rauncarcsec > 0:
+        if args.decuncarcsec < 0.0:
+            parser.error("If RA uncertainty is provided, Dec uncertainty must also be provided (and error ellipse cannot be provided")
+        elif args.frbuncmajorarcsec >= 0 or args.frbuncminorarcsec >= 0:
+            parser.error("Cannot supply both RA/dec uncertainties and an uncertainty ellipse via frbuncmajorarcsec/frbuncminorarcsec/frbuncpa!")
+        else: # Uncertainty is correctly specified via RA/Dec - convert to maj/min/pa
+            if args.rauncarcsec > args.decuncarcsec:
+                args.frbuncmajorarcsec = args.rauncarcsec
+                args.frbuncminorarcsec = args.decuncarcsec
+                args.frbuncpa = 90.0
+            else:
+                args.frbuncmajorarcsec = args.decuncarcsec
+                args.frbuncminorarcsec = args.rauncarcsec
+                args.frbuncpa = 0.0
+    elif args.frbuncmajorarcsec <= 0 or args.frbuncminorarcsec < 0:
+        parser.error("Must supply either RA/Dec uncertainty, or an uncertainty ellipse via frbuncmajorarcsec/frbuncminorarcsec/frbuncpa")
+
     # Check that we actually got a filename to work with
     if args.hostimagefile == '':
         parser.error('You must supply a FITS filename to hostimagefile')
 
     # Create FRBHost object
-    frbhost = FRBHost(args.hostimagefile, args.verbose, args.log)
+    frbhost = FRBHost(args.hostimagefile, args.verbose, args.log, args.zoompixels)
 
     # Expand the mask if desired
     frbhost.growMask(args.growmaskpixels)
 
     # Add the information about the FRB localisation
-    frbhost.addFRBLocalisation(args.frbra, args.frbdec, args.rauncarcsec, args.decuncarcsec)
+    frbhost.addFRBLocalisation(args.frbra, args.frbdec, args.frbuncmajorarcsec, args.frbuncminorarcsec, args.frbuncpa)
 
     # Calculate the likelihoods for different models and make plots
     frbhost.evaluateModels(args.dostretch)
