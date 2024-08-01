@@ -14,6 +14,7 @@ from matplotlib import pyplot as plt
 from matplotlib.patches import Ellipse
 from astropy.stats import sigma_clipped_stats
 from astropy.visualization import ImageNormalize,ZScaleInterval,LinearStretch,simple_norm
+from skimage import filters
 
 class FRBHost:
     def __init__(self, hostimagefile, verbose, log, zoompixels):
@@ -62,8 +63,8 @@ class FRBHost:
         else:
             self.zoompixels = []
 
-    def growMask(self, expandmaskby):
-        self.originalmaskdata = self.hostimagehdul[3].data
+    def growMask(self, expandmaskby, extramaskpixelstring, galaxymaskstring):
+        self.originalmaskdata = self.hostimagehdul[self.shortdescriptions.index('Mask')].data
         self.maskdata = np.copy(self.originalmaskdata)
 
         # Expand the mask by one pixel in every direction (one or more times)
@@ -76,12 +77,75 @@ class FRBHost:
                         self.maskdata[i][j+1] = 1
                         self.maskdata[i+1][j] = 1
             self.originalmaskdata = np.copy(self.maskdata)
-        self.originalmaskdata = self.hostimagehdul[3].data
 
+        # Log what we did
         if self.log==True:
             with open('{0}_{1}_log.txt'.format(self.name, self.filter), 'a') as f:
                 f.write('Growing mask by '+str(expandmaskby)+' pixels in each direction\n')
                 f.close()
+
+        # Add any extra mask pixels
+        extramaskpixels = extramaskpixelstring.split(',')
+        for e in extramaskpixels:
+            splite = e.split(':')
+            if not len(splite) == 2:
+                print("Mal-formatted extra mask pixel", e, '- ignoring')
+                continue
+            self.maskdata[int(splite[1])][int(splite[0])] = 1
+
+        # Log what we did
+        if self.log==True:
+            with open('{0}_{1}_log.txt'.format(self.name, self.filter), 'a') as f:
+                f.write('Adding the following extrapixels to the mask: {0}\n'.format(extramaskpixelstring))
+                f.close()
+
+        # Mask outside a given ellipse representing the galaxy
+        if galaxymaskstring != "":
+            galaxymaskparams = galaxymaskstring.split(',')
+            if not len(galaxymaskparams) == 3:
+                print("Mal-formatted galaxy mask string", galaxymaskstring, '- ignoring')
+            else:
+                galaxymaj = float(galaxymaskparams[0])
+                galaxymin = float(galaxymaskparams[1])
+                galaxypa  = float(galaxymaskparams[2])*np.pi/180. # Convert degrees to radians
+                pixcrd = np.array([[1, 1], [2, 2]])
+                world = self.w.wcs_pix2world(pixcrd, 0)
+                rapixscale = (world[0,0] - world[1,0])*3600*np.cos(world[1,1]*np.pi/180)*u.arcsec
+                decpixscale = (world[1,1] - world[0,1])*3600*u.arcsec
+                centrerapix = self.hostimagehdul[1].data.shape[0]//2
+                centredecpix = self.hostimagehdul[1].data.shape[1]//2
+                for i in range(self.hostimagehdul[1].data.shape[0]):
+                    for j in range(self.hostimagehdul[1].data.shape[1]):
+                        raoffset = (i - centrerapix)*rapixscale.value
+                        decoffset = (j - centredecpix)*decpixscale.value
+                        majoffset = decoffset*np.cos(-galaxypa) + raoffset*np.sin(-galaxypa)
+                        minoffset = raoffset*np.cos(-galaxypa) - decoffset*np.sin(-galaxypa)
+                        if (majoffset/galaxymaj)**2 + (minoffset/galaxymin)**2 >= 1:
+                            self.maskdata[j,i] = 1
+
+        # Log what we did
+        if self.log==True:
+            with open('{0}_{1}_log.txt'.format(self.name, self.filter), 'a') as f:
+                f.write('Masking region outside {0}\n'.format(galaxymaskstring))
+                f.close()                
+
+        # Save a copy of the final mask again (not sure a copy of the final mask again (not sure why...))
+        self.originalmaskdata = self.hostimagehdul[3].data
+
+    def addEdgeImage(self, parentdescription):
+        # Get the index of the parent image and mask image
+        parentindex = self.shortdescriptions.index(parentdescription)
+        maskindex = self.shortdescriptions.index('Mask')
+
+        # Append a new Image HDU to the end of the HDU list
+        self.hostimagehdul.append(self.hostimagehdul[1].copy())
+
+        # Replace the data with an edge filtered view of the residual
+        self.hostimagehdul[-1].data = np.abs(filters.roberts(self.hostimagehdul[parentindex].data * (1 - self.hostimagehdul[maskindex].data)))
+
+        # Update the descriptions
+        self.descriptions.append("Residual Edge Image")
+        self.shortdescriptions.append("ResidualEdge")
 
     def addFRBLocalisation(self, frbradeg, febdecdeg, frbmajoraxisarcsec, frbminoraxisarcsec, frbpadeg):
         # Store the information about the FRB localisation
@@ -113,10 +177,10 @@ class FRBHost:
         self.hostimagehdul.append(self.hostimagehdul[1].copy())
 
         # Make a deep copy of the data
-        self.hostimagehdul[4].data = copy.deepcopy(self.hostimagehdul[4].data)
+        self.hostimagehdul[-1].data = copy.deepcopy(self.hostimagehdul[-1].data)
 
         # Update this new Image HDU to contain the FRB likelihood
-        self.hostimagehdul[4].data -= self.hostimagehdul[4].data # Set it to zero initially
+        self.hostimagehdul[-1].data -= self.hostimagehdul[-1].data # Set it to zero initially
         oversamplefactor = 5
         subpixgrid = np.zeros(oversamplefactor*oversamplefactor*2).reshape(oversamplefactor*oversamplefactor, 2)
         for i in range(oversamplefactor):
@@ -127,8 +191,8 @@ class FRBHost:
         #for i in range(oversamplefactor):
         #    for j in range(oversamplefactor):
         #        subpixgrid.append([(i+oversamplefactor/2.0)/4.0, (j+oversamplefactor/2.0)/4.0])
-        for x in range(self.hostimagehdul[4].data.shape[0]):
-            for y in range(self.hostimagehdul[4].data.shape[1]):
+        for x in range(self.hostimagehdul[-1].data.shape[0]):
+            for y in range(self.hostimagehdul[-1].data.shape[1]):
                 pixgrid = [[l[0]+x, l[1]+y] for l in subpixgrid]
                 radecgrid = self.w.all_pix2world(pixgrid, 0)
                 radecoffsets = [[3600*(g[0]-self.frbradeg)*np.cos(self.frbdecdeg*np.pi/180), 3600*(g[1]-self.frbdecdeg)] for g in radecgrid]
@@ -137,19 +201,19 @@ class FRBHost:
                 norm = 1/(2*np.pi*self.frbmajoraxisarcsec*self.frbminoraxisarcsec)
                 #likelihoods = [norm*np.e**(-(o[0])**2/(2*self.sigmaraarcsec**2)) * np.e**(-(o[1])**2/(2*self.sigmadecarcsec**2)) for o in radecoffsets]
                 likelihoods = [norm*np.e**(-(o[0])**2/(2*self.frbmajoraxisarcsec**2)) * np.e**(-(o[1])**2/(2*self.frbminoraxisarcsec**2)) for o in majminoffsets]
-                self.hostimagehdul[4].data[y, x] = np.mean(likelihoods)
+                self.hostimagehdul[-1].data[y, x] = np.mean(likelihoods)
 
         # Normalise the FRB localisation probability density
-        imsum = self.hostimagehdul[4].data.sum()
-        self.hostimagehdul[4].data /= imsum
+        imsum = self.hostimagehdul[-1].data.sum()
+        self.hostimagehdul[-1].data /= imsum
 
         # Update the descriptions
         self.descriptions.append("FRB Localisation Likelihood")
         self.shortdescriptions.append("Localisation")
 
         # Create a space to store likelihoods
-        self.nummodels = len(self.hostimagehdul) - 2
-        self.modellikelihoods = np.zeros(self.nummodels)
+        #self.nummodels = len(self.hostimagehdul) - 2
+        self.modellikelihoods = np.zeros(len(self.hostimagehdul))
 
     def evaluateModels(self, dostretch):
         for i in range(len(self.descriptions)):
@@ -180,7 +244,7 @@ class FRBHost:
                     f.close()
 
             # Calculate the log likelihood for this model
-            self.modellikelihoods[i] = (imagedata * self.hostimagehdul[4].data).sum()
+            self.modellikelihoods[i] = (imagedata * self.hostimagehdul[self.shortdescriptions.index('Localisation')].data).sum()
 
     def printReport(self):
         for i in range(len(self.descriptions)):
@@ -212,7 +276,13 @@ class FRBHost:
             ax.coords[1].set_axislabel('Declination (J2000)')
 
             # Normalise and plot
-            norm = simple_norm(zoomdata, 'linear', percent=99.0)
+            #norm = simple_norm(zoomdata, 'linear', percent=99.0)
+            asinh_a_factor = 0.15
+            percent_factor = 100.0
+            if self.shortdescriptions[i] == "Original" or self.shortdescriptions[i] == "Profile":
+                asinh_a_factor = 0.015
+                percent_factor = 99.99
+            norm = simple_norm(zoomdata, 'asinh', asinh_a=asinh_a_factor, percent=percent_factor)
             ax.imshow(zoomdata, norm=norm) #, vmin=-2.e-5, vmax=2.e-4, origin='lower')
 
             # Plot the FRB localisation
@@ -242,6 +312,8 @@ if __name__ == "__main__":
     parser.add_argument('--frbuncminorarcsec', type=float, default=-1.0, help='Minor axis of FRB uncertainty (arcseconds)')
     parser.add_argument('--frbuncpa', type=float, default=-1.0, help='Position angle of FRB uncertainty (east of north, degrees)')
     parser.add_argument('--zoompixels', type=str, default="", help='Pixels to zoom in on in form blc,brc,tlc,trc')
+    parser.add_argument('--extramaskpixels', type=str, default="", help='Colon-separated list of pixels to mask, e.g. 50,50:50,51')
+    parser.add_argument('--galaxymask', type=str, default="", help="Major,minor,PAdegrees - mask outside this region (centred on centre of image)")
     parser.add_argument('--dostretch', default=False, action='store_true',
                         help='Apply a stretch to the host galaxy residual image')
     parser.add_argument('-v', '--verbose', default=False, action='store_true')
@@ -274,7 +346,10 @@ if __name__ == "__main__":
     frbhost = FRBHost(args.hostimagefile, args.verbose, args.log, args.zoompixels)
 
     # Expand the mask if desired
-    frbhost.growMask(args.growmaskpixels)
+    frbhost.growMask(args.growmaskpixels, args.extramaskpixels, args.galaxymask)
+
+    # Add an edge image
+    frbhost.addEdgeImage("Residual")
 
     # Add the information about the FRB localisation
     frbhost.addFRBLocalisation(args.frbra, args.frbdec, args.frbuncmajorarcsec, args.frbuncminorarcsec, args.frbuncpa)
