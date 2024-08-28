@@ -7,6 +7,7 @@ import numpy as np
 from astropy import wcs
 from astropy.io import fits
 from astropy import units as u
+from astropy.coordinates import SkyCoord
 #from astropy.modeling.models import Ellipse2D
 import matplotlib
 #matplotlib.use('Agg')
@@ -15,6 +16,7 @@ from matplotlib.patches import Ellipse
 from astropy.stats import sigma_clipped_stats
 from astropy.visualization import ImageNormalize,ZScaleInterval,LinearStretch,simple_norm
 from skimage import filters
+from photutils.aperture import SkyEllipticalAperture
 
 class FRBHost:
     def __init__(self, hostimagefile, verbose, log, zoompixels):
@@ -28,7 +30,7 @@ class FRBHost:
         self.hostimagehdul = fits.open(self.hostimagefile)
         if len(self.hostimagehdul) != 4:
             print("FITS image file must have 4 HDUs:")
-            print(descriptions)
+            print(self.descriptions)
             sys.exit()
 
         # Try and guess a name
@@ -156,6 +158,7 @@ class FRBHost:
         #self.frbtheta = 0 # placeholder for plotting FRB ellipse
         self.frbmajoraxisarcsec = frbmajoraxisarcsec
         self.frbminoraxisarcsec = frbminoraxisarcsec
+        self.frbpadeg = frbpadeg
         self.frbparad = frbpadeg*np.pi/180.0
 
         if self.log==True:
@@ -227,6 +230,8 @@ class FRBHost:
     
             # Theshold the residual (and the profile) image at zero - no negative values
             imagedata[imagedata < 0] = 0.0
+            #imagedata -= np.min(imagedata)
+            #imagedata *= (1-self.maskdata)
 
             # If dostretch, then do something here
             if dostretch:
@@ -286,8 +291,10 @@ class FRBHost:
             ax.imshow(zoomdata, norm=norm) #, vmin=-2.e-5, vmax=2.e-4, origin='lower')
 
             # Plot the FRB localisation
-            frb = Ellipse((self.frbradeg, self.frbdecdeg), width=(self.frbmajoraxisarcsec/3600)*2, height=(self.frbminoraxisarcsec/3600)*2, angle=90-self.frbparad*180/np.pi, edgecolor='white', facecolor='none', lw=2, transform=ax.get_transform('icrs'))
-            ax.add_patch(frb)
+            frb_position = SkyCoord(ra=self.frbradeg, dec=self.frbdecdeg, unit='deg')
+            frb_ell = SkyEllipticalAperture(frb_position, self.frbmajoraxisarcsec*u.arcsec, self.frbminoraxisarcsec*u.arcsec, self.frbpadeg*u.deg)
+            frb_apermap = frb_ell.to_pixel(self.w)
+            frb_apermap.plot(color='white', lw=2)
 
             # Save figure
             plt.savefig(self.name + "-" + self.shortdescriptions[i] + ".png")
